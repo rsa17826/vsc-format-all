@@ -20,7 +20,7 @@ const sentinelWaiters = new Map<string, () => void>();
 export function activate(context: ExtensionContext) {
   context.subscriptions.push(
     output,
-    // Add "local.format-all-files-patient" as the LAST entry of
+    // Add "rssaromeo.format-all-files-patient" as the LAST entry of
     // multiFormatter.formatterList. It makes no edits; it only signals that
     // every earlier formatter in the chain has finished.
     languages.registerDocumentFormattingEditProvider(
@@ -110,7 +110,7 @@ async function formatOne(uri: Uri, formatCommand: string) {
             reject(
               new Error(
                 `formatter chain never reached the sentinel within ${maxWaitMs}ms. ` +
-                  `Is "local.format-all-files-patient" the last entry of multiFormatter.formatterList?`,
+                  `Is "rssaromeo.format-all-files-patient" the last entry of multiFormatter.formatterList?`,
               ),
             ),
           maxWaitMs,
