@@ -1,0 +1,90 @@
+{
+  "name": "format-all-files-patient",
+  "displayName": "Format All Files (Patient)",
+  "description": "Formats every file in the workspace one at a time, waiting for chained formatters (e.g. Multi Formatter) to fully finish before saving and closing.",
+  "version": "1.0.0",
+  "publisher": "rssaromeo",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "main": "./out/extension.js",
+  "activationEvents": [],
+  "categories": [
+    "Formatters"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "formatAllFiles.run",
+        "title": "Format All Files (Patient)"
+      },
+      {
+        "command": "formatAllFiles.runOnFolder",
+        "title": "Format All Files In Folder (Patient)"
+      }
+    ],
+    "menus": {
+      "explorer/context": [
+        {
+          "command": "formatAllFiles.runOnFolder",
+          "when": "explorerResourceIsFolder",
+          "group": "7_modification"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Format All Files",
+      "properties": {
+        "formatAllFiles.formatCommand": {
+          "type": "string",
+          "default": "multiFormatter.formatDocument",
+          "description": "Command run on each file. It must return only after formatting is complete."
+        },
+        "formatAllFiles.include": {
+          "type": "string",
+          "default": "**/*",
+          "description": "Glob of files to format."
+        },
+        "formatAllFiles.exclude": {
+          "type": "string",
+          "default": "**/{node_modules,.git,dist,out,build,.vscode-test,.next,coverage}/**",
+          "description": "Glob of files to skip."
+        },
+        "formatAllFiles.settleMs": {
+          "type": "number",
+          "default": 300,
+          "description": "After the last formatter (sentinel) fires, wait until the document has had no changes for this many ms before saving/closing."
+        },
+        "formatAllFiles.maxWaitMs": {
+          "type": "number",
+          "default": 30000,
+          "description": "Maximum time to wait for a single file to settle."
+        },
+        "formatAllFiles.save": {
+          "type": "boolean",
+          "default": true,
+          "description": "Save each file after formatting."
+        },
+        "formatAllFiles.closeOpenedEditors": {
+          "type": "boolean",
+          "default": true,
+          "description": "Close editors that this extension opened (files already open stay open)."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile && npm run lint",
+    "lint": "eslint src",
+    "test": "vscode-test"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.80.0",
+    "typescript": "^5.4.0",
+    "@vscode/vsce": "^3.0.0"
+  }
+}
