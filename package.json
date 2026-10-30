@@ -8,7 +8,9 @@
     "vscode": "^1.80.0"
   },
   "main": "./out/extension.js",
-  "activationEvents": [],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "categories": [
     "Formatters"
   ],
