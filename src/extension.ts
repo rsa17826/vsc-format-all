@@ -183,7 +183,7 @@ async function run(folder: Uri | undefined) {
     .get<string>("formatCommand")!
 
   const targets = await findTargets(folder)
-  const formatters = new Set()
+  const formatters: Set<string | null | undefined> = new Set()
   if (targets.length === 0) {
     window.showInformationMessage(
       "Format All Files: no files matched.",
