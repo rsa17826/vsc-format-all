@@ -9,7 +9,8 @@
   },
   "main": "./out/extension.js",
   "activationEvents": [
-    "onStartupFinished"
+    "onStartupFinished",
+    "*"
   ],
   "categories": [
     "Formatters"
