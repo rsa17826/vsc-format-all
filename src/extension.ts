@@ -6,7 +6,6 @@ import {
   RelativePattern,
   TextDocument,
   Uri,
-  extensions,
   ViewColumn,
   window,
   workspace,
@@ -66,27 +65,17 @@ async function findTargets(folder: Uri | undefined) {
     folder ? new RelativePattern(folder, include) : include
   return workspace.findFiles(pattern, exclude)
 }
-async function activateFormatter(formatterId: string | undefined) {
-  if (!formatterId) return
 
-  const extension = extensions.getExtension(formatterId)
-
-  if (!extension) {
-    throw new Error(
-      `Formatter extension "${formatterId}" is not installed.`,
-    )
-  }
-
-  if (!extension.isActive) {
-    await extension.activate()
-  }
-}
 /**
  * Formats a single document and does not return until the document has
  * stopped changing. Chained formatters (like Multi Formatter) edit the
  * document several times, so a single command returning is not enough.
  */
-async function formatOne(uri: Uri, formatCommand: string) {
+async function formatOne(
+  uri: Uri,
+  formatCommand: string,
+  formatters: Set<string | null | undefined>,
+) {
   const config = workspace.getConfiguration("formatAllFiles")
   const settleMs = config.get<number>("settleMs")!
   const maxWaitMs = config.get<number>("maxWaitMs")!
@@ -107,12 +96,15 @@ async function formatOne(uri: Uri, formatCommand: string) {
       preview: false,
       viewColumn: ViewColumn.Active,
     })
+    // Let on-open hooks (e.g. Multi Formatter's default-formatter setup) finish
     const defaultFormatter = workspace
       .getConfiguration("editor", document)
-      .get<string | undefined>("defaultFormatter")
+      .get<string | null>("defaultFormatter")
 
-    if (!defaultFormatter) return
-    activateFormatter(defaultFormatter)
+    if (!formatters.has(defaultFormatter)) {
+      formatters.add(defaultFormatter)
+      await sleep(settleMs)
+    }
 
     if (defaultFormatter !== "Jota0222.multi-formatter") {
       // Not a chained formatter: a single normal pass, wait for it to finish
@@ -144,27 +136,35 @@ async function formatOne(uri: Uri, formatCommand: string) {
       }
     }
 
+    // Short buffer: wait until nothing has touched the document for settleMs
+    const start = Date.now()
+    let commandDone = Date.now()
+    lastChange = Math.max(lastChange, commandDone)
+    while (Date.now() - lastChange < settleMs) {
+      if (Date.now() - start > maxWaitMs) {
+        throw new Error(
+          `${uri.fsPath} was still changing after ${maxWaitMs}ms`,
+        )
+      }
+      await sleep(50)
+    }
+
     if (save && document.isDirty) {
-      if (!(await document.save()))
-        throw new Error(`Failed to save ${uri.fsPath}`)
+      const saved = await document.save()
+      if (!saved) throw new Error(`Failed to save ${uri.fsPath}`)
     }
 
     // Saving can trigger more edits (format on save, code actions): settle again
-    if (settleMs > 0) {
-      const start = Date.now()
-      while (Date.now() - Math.max(lastChange, start) < settleMs) {
-        await sleep(
-          Math.min(
-            50,
-            Date.now() - Math.max(lastChange, start),
-            settleMs,
-          ),
-        )
-      }
+    commandDone = Date.now()
+    while (
+      Date.now() - Math.max(lastChange, commandDone) <
+      settleMs
+    ) {
+      await sleep(50)
     }
     if (save && document.isDirty) {
-      if (!(await document.save()))
-        throw new Error(`Failed to save ${uri.fsPath}`)
+      const saved = await document.save()
+      if (!saved) throw new Error(`Failed to save ${uri.fsPath}`)
     }
 
     if (closeOpened && !wasOpen) {
@@ -183,6 +183,7 @@ async function run(folder: Uri | undefined) {
     .get<string>("formatCommand")!
 
   const targets = await findTargets(folder)
+  const formatters: Set<string | null | undefined> = new Set()
   if (targets.length === 0) {
     window.showInformationMessage(
       "Format All Files: no files matched.",
@@ -217,7 +218,7 @@ async function run(folder: Uri | undefined) {
           increment: 100 / targets.length,
         })
         try {
-          await formatOne(uri, formatCommand)
+          await formatOne(uri, formatCommand, formatters)
           output.appendLine(`OK    ${uri.fsPath}`)
         } catch (error) {
           // Not swallowed: logged per file and reported in the final summary
