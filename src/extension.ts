@@ -1,6 +1,8 @@
 import {
   commands,
+  extensions,
   ExtensionContext,
+  TextEdit,
   languages,
   ProgressLocation,
   RelativePattern,
@@ -65,17 +67,96 @@ async function findTargets(folder: Uri | undefined) {
     folder ? new RelativePattern(folder, include) : include
   return workspace.findFiles(pattern, exclude)
 }
+/**
+ * Resolves with the document's default formatter id as soon as it is set.
+ * Returns immediately if it already is; otherwise waits for the setting to
+ * change (e.g. Multi Formatter's on-open hook) and rejects after timeoutMs.
+ */
+function waitForDefaultFormatter(
+  document: TextDocument,
+  timeoutMs: number,
+) {
+  const read = () =>
+    workspace
+      .getConfiguration("editor", document)
+      .get<string | undefined>("defaultFormatter")
 
+  const current = read()
+  if (current) return Promise.resolve(current)
+
+  return new Promise<string>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      sub.dispose()
+      reject(
+        new Error(
+          `editor.defaultFormatter was never set for ${document.uri.fsPath} within ${timeoutMs}ms`,
+        ),
+      )
+    }, timeoutMs)
+    const sub = workspace.onDidChangeConfiguration((e) => {
+      if (
+        !e.affectsConfiguration("editor.defaultFormatter", document)
+      )
+        return
+      const value = read()
+      if (!value) return
+      clearTimeout(timer)
+      sub.dispose()
+      resolve(value)
+    })
+  })
+}
+// Only the first document per language+formatter needs to wait
+const readyFormatters = new Set<string>()
+
+/**
+ * Waits until the default formatter for this document's language has
+ * actually registered a formatting provider, and returns its id.
+ */
+async function waitForFormatterReady(
+  document: TextDocument,
+  timeoutMs: number,
+) {
+  const defaultFormatter = await waitForDefaultFormatter(
+    document,
+    timeoutMs,
+  )
+  const key = `${document.languageId}:${defaultFormatter}`
+  if (readyFormatters.has(key)) return defaultFormatter
+
+  const formatterExtension = extensions.getExtension(defaultFormatter)
+  if (!formatterExtension) {
+    throw new Error(
+      `Default formatter "${defaultFormatter}" is not installed`,
+    )
+  }
+  await formatterExtension.activate()
+
+  // activate() resolving doesn't mean the provider is registered yet.
+  // undefined = no provider can format this document; array = one can.
+  const start = Date.now()
+  while (true) {
+    const edits = await commands.executeCommand<
+      TextEdit[] | undefined
+    >("vscode.executeFormatDocumentProvider", document.uri)
+    if (edits) break
+    if (Date.now() - start > timeoutMs) {
+      throw new Error(
+        `${defaultFormatter} is the default formatter but never registered a formatter for ${document.languageId} within ${timeoutMs}ms`,
+      )
+    }
+    await sleep(100)
+  }
+
+  readyFormatters.add(key)
+  return defaultFormatter
+}
 /**
  * Formats a single document and does not return until the document has
  * stopped changing. Chained formatters (like Multi Formatter) edit the
  * document several times, so a single command returning is not enough.
  */
-async function formatOne(
-  uri: Uri,
-  formatCommand: string,
-  formatters: Set<string | null | undefined>,
-) {
+async function formatOne(uri: Uri, formatCommand: string) {
   const config = workspace.getConfiguration("formatAllFiles")
   const settleMs = config.get<number>("settleMs")!
   const maxWaitMs = config.get<number>("maxWaitMs")!
@@ -96,16 +177,10 @@ async function formatOne(
       preview: false,
       viewColumn: ViewColumn.Active,
     })
-    // Let on-open hooks (e.g. Multi Formatter's default-formatter setup) finish
-    const defaultFormatter = workspace
-      .getConfiguration("editor", document)
-      .get<string | null>("defaultFormatter")
-
-    if (!formatters.has(defaultFormatter)) {
-      formatters.add(defaultFormatter)
-      await sleep(settleMs)
-    }
-
+    const defaultFormatter = await waitForFormatterReady(
+      document,
+      maxWaitMs,
+    )
     if (defaultFormatter !== "Jota0222.multi-formatter") {
       // Not a chained formatter: a single normal pass, wait for it to finish
       await commands.executeCommand("editor.action.formatDocument")
@@ -183,7 +258,6 @@ async function run(folder: Uri | undefined) {
     .get<string>("formatCommand")!
 
   const targets = await findTargets(folder)
-  const formatters: Set<string | null | undefined> = new Set()
   if (targets.length === 0) {
     window.showInformationMessage(
       "Format All Files: no files matched.",
@@ -218,7 +292,7 @@ async function run(folder: Uri | undefined) {
           increment: 100 / targets.length,
         })
         try {
-          await formatOne(uri, formatCommand, formatters)
+          await formatOne(uri, formatCommand)
           output.appendLine(`OK    ${uri.fsPath}`)
         } catch (error) {
           // Not swallowed: logged per file and reported in the final summary
