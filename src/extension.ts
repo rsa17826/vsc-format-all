@@ -105,41 +105,60 @@ function waitForDefaultFormatter(
     })
   })
 }
-// Formatters that have had their warm-up pass (first doc per language+formatter)
-const warmedFormatters = new Set<string>()
+// Time for a formatter to register its provider after activate() resolves
+const REGISTRATION_BUFFER_MS = 10
+
+// One activation per extension id, shared by everything that needs it
+type FormatterReady = Map<string, Promise<void>>
 
 /**
- * Waits for the default formatter to be set and its extension to be
- * activated. Returns the formatter id and whether this is the first
- * document seen for that language+formatter.
+ * Starts activating one formatter extension and records a promise that
+ * resolves once it is activated and the registration buffer has passed.
  */
-async function prepareFormatter(
-  document: TextDocument,
-  timeoutMs: number,
-) {
-  const defaultFormatter = await waitForDefaultFormatter(
-    document,
-    timeoutMs,
-  )
-  const formatterExtension = extensions.getExtension(defaultFormatter)
+function startActivation(id: string, ready: FormatterReady) {
+  const formatterExtension = extensions.getExtension(id)
   if (!formatterExtension) {
-    throw new Error(
-      `Default formatter "${defaultFormatter}" is not installed`,
+    throw new Error(`Default formatter "${id}" is not installed`)
+  }
+  const promise = (async () => {
+    await formatterExtension.activate()
+    await sleep(REGISTRATION_BUFFER_MS)
+  })()
+  ready.set(id, promise)
+  return promise
+}
+/**
+ * Starts activating every extension that is the default formatter for some
+ * language, in parallel, without waiting for any of them. Returns the
+ * promises keyed by extension id so each file can await its own formatter.
+ */
+async function preactivateFormatters() {
+  const ready: FormatterReady = new Map()
+  for (const languageId of await languages.getLanguages()) {
+    const id = workspace
+      .getConfiguration("editor", { languageId })
+      .get<string | null>("defaultFormatter")
+    if (!id || ready.has(id)) continue
+    // Uninstalled ids are reported per file later, not here
+    if (!extensions.getExtension(id)) continue
+    startActivation(id, ready).catch((error) =>
+      output.appendLine(
+        `Activation failed for ${id}: ${String(error)}`,
+      ),
     )
   }
-  await formatterExtension.activate()
-
-  const key = `${document.languageId}:${defaultFormatter}`
-  const first = !warmedFormatters.has(key)
-  warmedFormatters.add(key)
-  return { defaultFormatter, first }
+  return ready
 }
 /**
  * Formats a single document and does not return until the document has
  * stopped changing. Chained formatters (like Multi Formatter) edit the
  * document several times, so a single command returning is not enough.
  */
-async function formatOne(uri: Uri, formatCommand: string) {
+async function formatOne(
+  uri: Uri,
+  formatCommand: string,
+  ready: FormatterReady,
+) {
   const config = workspace.getConfiguration("formatAllFiles")
   const settleMs = config.get<number>("settleMs")!
   const maxWaitMs = config.get<number>("maxWaitMs")!
@@ -160,16 +179,17 @@ async function formatOne(uri: Uri, formatCommand: string) {
       preview: false,
       viewColumn: ViewColumn.Active,
     })
-    const { defaultFormatter, first } = await prepareFormatter(
+    const defaultFormatter = await waitForDefaultFormatter(
       document,
       maxWaitMs,
     )
+    // Pre-started if known up front; formatters that are only set at open
+    // time (Multi Formatter) get activated now and recorded for later files
+    await (ready.get(defaultFormatter) ??
+      startActivation(defaultFormatter, ready))
+
     if (defaultFormatter !== "Jota0222.multi-formatter") {
       await commands.executeCommand("editor.action.formatDocument")
-      if (first) {
-        // Warm-up: the provider may not have been registered for the first call
-        await commands.executeCommand("editor.action.formatDocument")
-      }
     } else {
       const key = uri.toString()
       const sentinel = new Promise<void>((resolve) =>
@@ -260,7 +280,7 @@ async function run(folder: Uri | undefined) {
   output.appendLine(
     `Formatting ${targets.length} files with ${formatCommand}`,
   )
-
+  const ready = await preactivateFormatters()
   await window.withProgress(
     {
       location: ProgressLocation.Notification,
@@ -278,7 +298,7 @@ async function run(folder: Uri | undefined) {
           increment: 100 / targets.length,
         })
         try {
-          await formatOne(uri, formatCommand)
+          await formatOne(uri, formatCommand, ready)
           output.appendLine(`OK    ${uri.fsPath}`)
         } catch (error) {
           // Not swallowed: logged per file and reported in the final summary
