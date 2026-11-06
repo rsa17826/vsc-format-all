@@ -2,7 +2,6 @@ import {
   commands,
   extensions,
   ExtensionContext,
-  TextEdit,
   languages,
   ProgressLocation,
   RelativePattern,
@@ -106,14 +105,15 @@ function waitForDefaultFormatter(
     })
   })
 }
-// Only the first document per language+formatter needs to wait
-const readyFormatters = new Set<string>()
+// Formatters that have had their warm-up pass (first doc per language+formatter)
+const warmedFormatters = new Set<string>()
 
 /**
- * Waits until the default formatter for this document's language has
- * actually registered a formatting provider, and returns its id.
+ * Waits for the default formatter to be set and its extension to be
+ * activated. Returns the formatter id and whether this is the first
+ * document seen for that language+formatter.
  */
-async function waitForFormatterReady(
+async function prepareFormatter(
   document: TextDocument,
   timeoutMs: number,
 ) {
@@ -121,9 +121,6 @@ async function waitForFormatterReady(
     document,
     timeoutMs,
   )
-  const key = `${document.languageId}:${defaultFormatter}`
-  if (readyFormatters.has(key)) return defaultFormatter
-
   const formatterExtension = extensions.getExtension(defaultFormatter)
   if (!formatterExtension) {
     throw new Error(
@@ -132,24 +129,10 @@ async function waitForFormatterReady(
   }
   await formatterExtension.activate()
 
-  // activate() resolving doesn't mean the provider is registered yet.
-  // undefined = no provider can format this document; array = one can.
-  const start = Date.now()
-  while (true) {
-    const edits = await commands.executeCommand<
-      TextEdit[] | undefined
-    >("vscode.executeFormatDocumentProvider", document.uri)
-    if (edits) break
-    if (Date.now() - start > timeoutMs) {
-      throw new Error(
-        `${defaultFormatter} is the default formatter but never registered a formatter for ${document.languageId} within ${timeoutMs}ms`,
-      )
-    }
-    await sleep(100)
-  }
-
-  readyFormatters.add(key)
-  return defaultFormatter
+  const key = `${document.languageId}:${defaultFormatter}`
+  const first = !warmedFormatters.has(key)
+  warmedFormatters.add(key)
+  return { defaultFormatter, first }
 }
 /**
  * Formats a single document and does not return until the document has
@@ -177,13 +160,16 @@ async function formatOne(uri: Uri, formatCommand: string) {
       preview: false,
       viewColumn: ViewColumn.Active,
     })
-    const defaultFormatter = await waitForFormatterReady(
+    const { defaultFormatter, first } = await prepareFormatter(
       document,
       maxWaitMs,
     )
     if (defaultFormatter !== "Jota0222.multi-formatter") {
-      // Not a chained formatter: a single normal pass, wait for it to finish
       await commands.executeCommand("editor.action.formatDocument")
+      if (first) {
+        // Warm-up: the provider may not have been registered for the first call
+        await commands.executeCommand("editor.action.formatDocument")
+      }
     } else {
       const key = uri.toString()
       const sentinel = new Promise<void>((resolve) =>
